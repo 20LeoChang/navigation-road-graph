@@ -1,0 +1,98 @@
+name: Build Taiwan ROAD_GRAPH
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Monday 03:30 Taiwan time = Sunday 19:30 UTC
+    - cron: "30 19 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taiwan-road-graph-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download latest Taiwan OSM PBF
+        run: |
+          curl -fL \
+            --retry 5 \
+            --retry-delay 5 \
+            -o taiwan-latest.osm.pbf \
+            https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
+          ls -lh taiwan-latest.osm.pbf
+
+      - name: Build all Taiwan ROAD_GRAPH tiles
+        run: |
+          python scripts/build_taiwan_graph.py \
+            --pbf taiwan-latest.osm.pbf \
+            --out dist/graph/v1/TW
+
+      - name: Build v4 Taiwan hierarchical overlay
+        run: |
+          python scripts/build_v4_overlay.py \
+            --pbf taiwan-latest.osm.pbf \
+            --out dist/graph/v4/TW/overlay.json
+          ls -lh dist/graph/v4/TW/overlay.json
+
+      - name: Show manifest summary
+        run: |
+          python - <<'PY'
+          import json
+          p="dist/graph/v1/TW/_manifest.json"
+          x=json.load(open(p,encoding="utf-8"))
+          print("tiles =", x["tileCount"])
+          print("edges =", x["edgeCount"])
+          print("MiB   =", round(x["totalJsonBytes"]/1024/1024,1))
+          PY
+
+      - name: Upload to Cloudflare R2
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python scripts/upload_r2.py \
+            --dir dist/graph/v1/TW \
+            --bucket navigation \
+            --prefix graph/v1/TW \
+            --workers 12 \
+            --delete-stale
+
+      - name: Upload v4 hierarchical overlay to Cloudflare R2
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          python scripts/upload_r2.py \
+            --dir dist/graph/v4/TW \
+            --bucket navigation \
+            --prefix graph/v4/TW \
+            --workers 4 \
+            --delete-stale
+
+      - name: Save build manifest as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: taiwan-road-graph-manifest
+          path: dist/graph/v1/TW/_manifest.json
+          retention-days: 30
