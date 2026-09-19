@@ -47,11 +47,18 @@ def main():
 
     def upload(item):
         key, path = item
+        suffix = path.suffix.lower()
+        if suffix == ".json":
+            content_type = "application/json"
+        elif suffix == ".bin":
+            content_type = "application/octet-stream"
+        else:
+            content_type = "application/octet-stream"
         s3.upload_file(
             str(path),
             args.bucket,
             key,
-            ExtraArgs={"ContentType": "application/json"},
+            ExtraArgs={"ContentType": content_type},
         )
         return key
 
