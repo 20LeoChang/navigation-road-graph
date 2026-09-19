@@ -1,112 +1,61 @@
-# Taiwan ROAD_GRAPH 全台預建
+# Taiwan ROAD_GRAPH v4 hierarchical pipeline
 
-這套流程直接產生目前 `navigation` Worker 可讀的：
+This pipeline keeps the existing `graph/v1/TW/*.json` detailed car graph **and** builds a new precomputed `graph/v4/TW/overlay.json` hierarchy for `/route/custom-car`.
 
-`graph/v1/TW/<south>_<west>.json`
+## Why v4 exists
 
-不需要修改 Worker，也不需要再用 `/graph/build-tile` 一格一格抓 OSM Main API。
+The v3 Worker dynamically loaded many detailed JSON tiles and ran ordinary A* directly on the dense Taiwan road graph. Dense Taipei/New Taipei routes and long/cross-mountain routes could therefore hit Cloudflare Worker Error 1102 (CPU/memory resource limit).
 
-## 1. 建 GitHub repository
+v4 moves the expensive nationwide topology work into GitHub Actions:
 
-把這個資料夾內容放進一個 GitHub repository：
+1. Download Taiwan OSM PBF from Geofabrik.
+2. Build the existing detailed `graph/v1/TW` tiles.
+3. Run a second OSM pass for major drivable roads (`motorway` through `tertiary`).
+4. Contract road geometry between junction/end nodes into a compact directed overlay.
+5. Store the overlay as CSR arrays plus a 0.10-degree spatial index.
+6. Upload `graph/v4/TW/overlay.json` to the same `navigation` R2 bucket.
 
-- `.github/workflows/build-taiwan-road-graph.yml`
-- `scripts/build_taiwan_graph.py`
-- `scripts/upload_r2.py`
-- `requirements.txt`
+At query time the v4 Worker:
 
-## 2. Cloudflare R2 建 API Token
+- snaps start/end using the existing detailed graph;
+- runs a very small A* on the precomputed overlay;
+- converts the overlay result into a geographic corridor;
+- runs **one** detailed local A* inside that corridor;
+- then uses the existing HERE + TDX traffic matcher and existing signal/ETA logic.
 
-Cloudflare Dashboard：
+The motorcycle `/route` endpoint is not changed.
 
-Storage & databases → R2 → Overview → Manage API Tokens
+## GitHub Secrets
 
-建立只允許 `navigation` bucket 的 Object Read & Write token。
-
-記下：
-
-- Access Key ID
-- Secret Access Key
-- S3 endpoint
-
-一般 endpoint：
-
-`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
-
-若 bucket 有 jurisdiction，請直接使用 Cloudflare 顯示的 jurisdiction-specific endpoint。
-
-## 3. GitHub Secrets
-
-GitHub repository：
-
-Settings → Secrets and variables → Actions → New repository secret
-
-建立：
+Keep the same secrets you already configured:
 
 - `R2_ENDPOINT`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 
-`R2_ENDPOINT` 要填完整 URL。
+Do not commit secrets into the repository.
 
-## 4. 第一次跑
+## Files
 
-GitHub → Actions → Build Taiwan ROAD_GRAPH → Run workflow
+- `scripts/build_taiwan_graph.py` – current v1 detailed graph builder.
+- `scripts/build_v4_overlay.py` – v4 hierarchical overlay builder.
+- `scripts/upload_r2.py` – R2 uploader.
+- `.github/workflows/build-taiwan-road-graph.yml` – builds and uploads both v1 and v4.
 
-流程會：
+## Expected R2 keys
 
-1. 下載 `taiwan-latest.osm.pbf`
-2. 一次串流解析全台 OSM
-3. 依 0.05° × 0.05° 分 tile
-4. 建 directed car graph
-5. 產生 `graph/v1/TW/*.json`
-6. 上傳到 R2 bucket `navigation`
-7. 刪除同 prefix 下舊版已不存在的 tile
+```text
+graph/v1/TW/<0.05-degree-tile>.json
+graph/v1/TW/_manifest.json
+graph/v4/TW/overlay.json
+```
 
-## 5. 與目前 Worker 相容
+## Deployment order
 
-格式與目前 Worker v3.2.0 一致：
+1. Push these pipeline files to your existing `navigation-road-graph` repository.
+2. Run **Build Taiwan ROAD_GRAPH** manually once.
+3. Confirm `graph/v4/TW/overlay.json` exists in R2 bucket `navigation`.
+4. Deploy the supplied v4 Worker.
+5. Test `/route/custom-car`; `/health` should report the v4 overlay key.
 
-Nodes:
-
-`["osmNodeId", lat, lon]`
-
-Edges:
-
-`["from","to",lengthM,defaultSpeedKph,highway,name,osmWayId]`
-
-ownership：
-
-`edge stored in tile containing FROM node`
-
-因此 Worker 原本的：
-
-`ROAD_GRAPH → navigation`
-
-不需要改。
-
-## 6. 更新頻率
-
-Workflow 已設：
-
-每週一 03:30（台灣時間）自動重建一次。
-
-也可以隨時手動 Run workflow。
-
-## 7. v3.2.0 Queue 還是保留
-
-全台預建是正常資料來源。
-
-`GRAPH_BUILD_QUEUE` 則保留成缺檔修復 fallback。正常情況不應該靠 Queue 建整個台灣。
-
-## 注意
-
-目前 pipeline 直接更新 `graph/v1/TW/`。因此上傳的幾分鐘內可能存在少量新舊 tile 混用。
-
-等全台 routing 驗證完成後，再升級成 release/pointer：
-
-`graph/releases/<release>/TW/...`
-
-最後原子切換 `graph/current.json`。
-
-這樣正式更新時就能做到零混版。
+The v4 Worker includes a controlled fallback to the existing v3.7.1 car router if the overlay object has not been uploaded yet, so deployment order is safer.
