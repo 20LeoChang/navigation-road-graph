@@ -46,25 +46,32 @@ jobs:
             --pbf taiwan-latest.osm.pbf \
             --out dist/graph/v1/TW
 
-      - name: Build v4 Taiwan hierarchical overlay
+      - name: Build v4.1 compact hierarchical overlay
         run: |
-          python scripts/build_v4_overlay.py \
+          python scripts/build_v41_compact_overlay.py \
             --pbf taiwan-latest.osm.pbf \
-            --out dist/graph/v4/TW/overlay.json
-          ls -lh dist/graph/v4/TW/overlay.json
+            --out-dir dist/graph/v4.1/TW
+          find dist/graph/v4.1/TW -maxdepth 2 -type f -printf '%p %k KB\n' | sort | tail -80
 
       - name: Show manifest summary
         run: |
           python - <<'PY'
-          import json
+          import json, os
           p="dist/graph/v1/TW/_manifest.json"
           x=json.load(open(p,encoding="utf-8"))
-          print("tiles =", x["tileCount"])
-          print("edges =", x["edgeCount"])
-          print("MiB   =", round(x["totalJsonBytes"]/1024/1024,1))
+          print("v1 tiles =", x["tileCount"])
+          print("v1 edges =", x["edgeCount"])
+          print("v1 MiB   =", round(x["totalJsonBytes"]/1024/1024,1))
+          idx=json.load(open("dist/graph/v4.1/TW/index.json",encoding="utf-8"))
+          print("v4.1 nodes =", idx["stats"]["nodeCount"])
+          print("v4.1 edges =", idx["stats"]["edgeCount"])
+          print("v4.1 geometryChunks =", idx["stats"]["geometryChunkCount"])
+          for f in ("index.json","topology.bin"):
+              s=os.path.getsize("dist/graph/v4.1/TW/"+f)
+              print(f, round(s/1024/1024,3), "MiB")
           PY
 
-      - name: Upload to Cloudflare R2
+      - name: Upload v1 detail graph to Cloudflare R2
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -77,22 +84,24 @@ jobs:
             --workers 12 \
             --delete-stale
 
-      - name: Upload v4 hierarchical overlay to Cloudflare R2
+      - name: Upload v4.1 compact overlay to Cloudflare R2
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           python scripts/upload_r2.py \
-            --dir dist/graph/v4/TW \
+            --dir dist/graph/v4.1/TW \
             --bucket navigation \
-            --prefix graph/v4/TW \
-            --workers 4 \
+            --prefix graph/v4.1/TW \
+            --workers 8 \
             --delete-stale
 
-      - name: Save build manifest as artifact
+      - name: Save build manifests as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: taiwan-road-graph-manifest
-          path: dist/graph/v1/TW/_manifest.json
+          name: taiwan-road-graph-manifest-v41
+          path: |
+            dist/graph/v1/TW/_manifest.json
+            dist/graph/v4.1/TW/index.json
           retention-days: 30
