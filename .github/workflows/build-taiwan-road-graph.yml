@@ -3,7 +3,6 @@ name: Build Taiwan ROAD_GRAPH
 on:
   workflow_dispatch:
   schedule:
-    # Every Monday 03:30 Taiwan time = Sunday 19:30 UTC
     - cron: "30 19 * * 0"
 
 permissions:
@@ -33,42 +32,41 @@ jobs:
 
       - name: Download latest Taiwan OSM PBF
         run: |
-          curl -fL \
-            --retry 5 \
-            --retry-delay 5 \
+          curl -fL --retry 5 --retry-delay 5 \
             -o taiwan-latest.osm.pbf \
             https://download.geofabrik.de/asia/taiwan-latest.osm.pbf
           ls -lh taiwan-latest.osm.pbf
 
-      - name: Build all Taiwan ROAD_GRAPH tiles
+      - name: Build all Taiwan ROAD_GRAPH detail tiles
         run: |
           python scripts/build_taiwan_graph.py \
             --pbf taiwan-latest.osm.pbf \
             --out dist/graph/v1/TW
 
-      - name: Build v4.1 compact hierarchical overlay
+      - name: Build v4.2 multilevel SCC overlay
         run: |
-          python scripts/build_v41_compact_overlay.py \
+          python scripts/build_v42_multilevel_overlay.py \
             --pbf taiwan-latest.osm.pbf \
-            --out-dir dist/graph/v4.1/TW
-          find dist/graph/v4.1/TW -maxdepth 2 -type f -printf '%p %k KB\n' | sort | tail -80
+            --out-dir dist/graph/v4.2/TW
+          find dist/graph/v4.2/TW -maxdepth 2 -type f -printf '%p %k KB\n' | sort | tail -100
 
       - name: Show manifest summary
         run: |
           python - <<'PY'
           import json, os
-          p="dist/graph/v1/TW/_manifest.json"
-          x=json.load(open(p,encoding="utf-8"))
-          print("v1 tiles =", x["tileCount"])
-          print("v1 edges =", x["edgeCount"])
-          print("v1 MiB   =", round(x["totalJsonBytes"]/1024/1024,1))
-          idx=json.load(open("dist/graph/v4.1/TW/index.json",encoding="utf-8"))
-          print("v4.1 nodes =", idx["stats"]["nodeCount"])
-          print("v4.1 edges =", idx["stats"]["edgeCount"])
-          print("v4.1 geometryChunks =", idx["stats"]["geometryChunkCount"])
-          for f in ("index.json","topology.bin"):
-              s=os.path.getsize("dist/graph/v4.1/TW/"+f)
-              print(f, round(s/1024/1024,3), "MiB")
+          m=json.load(open("dist/graph/v1/TW/_manifest.json",encoding="utf-8"))
+          print("v1 tiles =",m["tileCount"])
+          print("v1 edges =",m["edgeCount"])
+          idx=json.load(open("dist/graph/v4.2/TW/index.json",encoding="utf-8"))
+          print("v4.2 nodes =",idx["stats"]["nodeCount"])
+          print("v4.2 edges =",idx["stats"]["edgeCount"])
+          print("v4.2 components =",idx["stats"]["componentCount"])
+          print("v4.2 giant SCC nodes =",idx["stats"]["giantComponentNodeCount"])
+          print("v4.2 L2 regions =",idx["stats"]["level2RegionCount"])
+          print("v4.2 L2 edges =",idx["stats"]["level2EdgeCount"])
+          for f in ("index.json","topology.bin","components.bin","level2.json"):
+              s=os.path.getsize("dist/graph/v4.2/TW/"+f)
+              print(f,round(s/1024/1024,3),"MiB")
           PY
 
       - name: Upload v1 detail graph to Cloudflare R2
@@ -84,24 +82,25 @@ jobs:
             --workers 12 \
             --delete-stale
 
-      - name: Upload v4.1 compact overlay to Cloudflare R2
+      - name: Upload v4.2 overlay to Cloudflare R2
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           python scripts/upload_r2.py \
-            --dir dist/graph/v4.1/TW \
+            --dir dist/graph/v4.2/TW \
             --bucket navigation \
-            --prefix graph/v4.1/TW \
+            --prefix graph/v4.2/TW \
             --workers 8 \
             --delete-stale
 
       - name: Save build manifests as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: taiwan-road-graph-manifest-v41
+          name: taiwan-road-graph-manifest-v42
           path: |
             dist/graph/v1/TW/_manifest.json
-            dist/graph/v4.1/TW/index.json
+            dist/graph/v4.2/TW/index.json
+            dist/graph/v4.2/TW/level2.json
           retention-days: 30
